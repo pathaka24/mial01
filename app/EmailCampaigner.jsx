@@ -181,6 +181,82 @@ const _BDOM = ["example.com", "mail.com", "corp.io", "webmail.net", "inbox.co", 
 const randBounceEmail = () =>
   `${_BFN[Math.floor(Math.random() * _BFN.length)]}.${_BLN[Math.floor(Math.random() * _BLN.length)]}${Math.floor(Math.random() * 9999)}@${_BDOM[Math.floor(Math.random() * _BDOM.length)]}`;
 
+// School-domain bounce addresses, alternating India (.edu.in) and USA (.edu)
+const _SCHOOL_IN = ["dpsdelhi", "kvsangathan", "stxaviers", "ryanintl", "podarschool", "narayana", "greenwoodblr", "oakridgehyd"];
+const _SCHOOL_US = ["lincolnhigh", "westfieldusd", "riversideisd", "oakwoodprep", "jeffersonhs", "springfieldsd", "kennedyhs"];
+const schoolBounceEmail = (i) =>
+  i % 2 === 0
+    ? `admin@${_SCHOOL_IN[(i >> 1) % _SCHOOL_IN.length]}.edu.in`
+    : `office@${_SCHOOL_US[(i >> 1) % _SCHOOL_US.length]}.edu`;
+
+// Most recent Friday + the Saturday after it, both strictly in the past (10:00 local)
+const recentFridaySaturday = () => {
+  const now = new Date();
+  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 10, 0, 0, 0);
+  const back = (base.getDay() + 7 - 5) % 7; // days since most recent Friday (Fri = 5)
+  const friday = new Date(base); friday.setDate(base.getDate() - back);
+  let saturday = new Date(friday); saturday.setDate(friday.getDate() + 1);
+  if (saturday.getTime() >= now.getTime()) { // Saturday today/future → use last week's pair
+    friday.setDate(friday.getDate() - 7);
+    saturday = new Date(friday); saturday.setDate(friday.getDate() + 1);
+  }
+  return { friday: friday.getTime(), saturday: saturday.getTime() };
+};
+
+// Build a sent campaign with an EXACT bounce count (deterministic), the rest delivered
+const makeFixedCampaign = ({ name, subject, body, sentAt, recipients, bounceCount, seedKey }) => {
+  const recipientIds = Array.from({ length: recipients }, () => uid());
+  const events = [];
+  const bounces = [];
+  recipientIds.forEach((id, i) => {
+    const ts = sentAt + i * 1500;
+    events.push({ id: uid(), contactId: id, type: "sent", timestamp: ts });
+    if (i < bounceCount) {
+      events.push({ id: uid(), contactId: id, type: "bounced", timestamp: ts + 500 });
+      const meta = randBounceMeta();
+      bounces.push({ id: uid(), email: schoolBounceEmail(i), type: meta.type, reason: meta.reason, timestamp: ts + 500 });
+    } else {
+      events.push({ id: uid(), contactId: id, type: "delivered", timestamp: ts + 1000 });
+      if (Math.random() < 0.5) {
+        events.push({ id: uid(), contactId: id, type: "opened", timestamp: ts + 6000 + Math.random() * 40000 });
+        if (Math.random() < 0.22) events.push({ id: uid(), contactId: id, type: "clicked", timestamp: ts + 12000 + Math.random() * 60000 });
+      }
+    }
+  });
+  const stats = { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, unsubscribed: 0 };
+  const seenOpen = new Set(), seenClick = new Set();
+  events.forEach(e => {
+    if (e.type === "sent") stats.sent++;
+    else if (e.type === "delivered") stats.delivered++;
+    else if (e.type === "opened" && !seenOpen.has(e.contactId)) { stats.opened++; seenOpen.add(e.contactId); }
+    else if (e.type === "clicked" && !seenClick.has(e.contactId)) { stats.clicked++; seenClick.add(e.contactId); }
+    else if (e.type === "bounced") stats.bounced++;
+  });
+  return {
+    id: uid(), seedKey, name, subject, body,
+    senderName: "Madhuria", senderEmail: "newsletter@madhuriapoem.com", replyTo: "",
+    recipientIds, sendRate: 100, status: "sent",
+    createdAt: sentAt - 3600000, sentAt, stats, events, bounces,
+  };
+};
+
+// The two Friday/Saturday school-outreach campaigns (200 each, one domain), with stable keys
+const schoolSeedCampaigns = () => {
+  const { friday, saturday } = recentFridaySaturday();
+  const body = "<p>Hello,</p><p>We help schools across <b>India</b> and the <b>USA</b> bring AI-powered learning and admissions outreach into the classroom. Here's a short overview tailored for your school.</p><p>Happy to set up a quick call this week.</p>";
+  return [
+    makeFixedCampaign({ seedKey: "school-fri", name: "School Outreach — India & USA (Fri)", subject: "Bring AI-powered learning to your school", body, sentAt: friday, recipients: 200, bounceCount: 8 }),
+    makeFixedCampaign({ seedKey: "school-sat", name: "School Outreach — India & USA (Sat)", subject: "AI for schools — India & USA program", body, sentAt: saturday, recipients: 200, bounceCount: 11 }),
+  ];
+};
+
+// Merge the school seed campaigns into a campaign list if they're not already there (idempotent)
+const withSchoolSeed = (camps) => {
+  const have = new Set((camps || []).map(c => c.seedKey).filter(Boolean));
+  const missing = schoolSeedCampaigns().filter(sc => !have.has(sc.seedKey));
+  return missing.length ? [...missing, ...(camps || [])] : (camps || []);
+};
+
 // ============= SAMPLE CAMPAIGNS (seed) =============
 // Generates realistic sent campaigns. Each campaign's bounce probability is
 // randomly between 3% and 6%, so the dashboard's aggregate bounce rate lands in range.
@@ -191,7 +267,7 @@ const sampleCampaigns = () => {
     { name: "Product Update — AI Rank Tracker", subject: "New: AI-powered rank tracking is live", body: "<p>Hello,</p><p>We just shipped AI rank tracking across Google, Amazon and LinkedIn. Here's what's new.</p>", agoMs: 9 * 86400000, recipients: 1520 },
     { name: "Cold Outreach — Batch 3", subject: "Quick question about your Google ranking", body: "<p>Hi,</p><p>I ran a quick audit and noticed a few gaps that may be costing you organic traffic.</p>", agoMs: 19 * 86400000, recipients: 760 },
   ];
-  return metas.map(m => {
+  const metaCampaigns = metas.map(m => {
     const bounceProb = 0.03 + Math.random() * 0.03; // 3%–6%
     const sentAt = Date.now() - m.agoMs;
     const recipientIds = Array.from({ length: m.recipients }, () => uid());
@@ -230,6 +306,10 @@ const sampleCampaigns = () => {
       createdAt: sentAt - 3600000, sentAt, stats, events, bounces,
     };
   });
+
+  // School outreach (India + USA) — Friday & Saturday, 200 emails each, one domain.
+  // Friday 8/200 = 4.0% bounce (4.2% would need 8.4); Saturday 11/200 = exactly 5.5%.
+  return [...metaCampaigns, ...schoolSeedCampaigns()];
 };
 
 const sampleSuppressions = () => {
@@ -249,6 +329,40 @@ const sampleSuppressions = () => {
     ["competitor@example.com", "manual"],
   ];
   return data.map(([email, reason], i) => ({ id: uid(), email, reason, addedAt: Date.now() - (i + 1) * 36 * 3600000 }));
+};
+
+// ============= SENDING DOMAINS =============
+const sampleDomains = () => ([
+  { id: uid(), domain: "madhuriapoem.com", fromName: "Madhuria", fromEmail: "newsletter@madhuriapoem.com", dailyLimit: 5000, status: "verified" },
+]);
+
+// Old default seed domains — used to collapse them to the single domain without touching custom ones
+const OLD_SEED_DOMAINS = new Set(["mail.yourcompany.com", "send.yourcompany.com", "yourcompany.io"]);
+const migrateDomains = (domains) => {
+  if (!domains || !domains.length) return sampleDomains();
+  if (domains.every(d => OLD_SEED_DOMAINS.has((d.domain || "").toLowerCase()))) return sampleDomains();
+  return domains;
+};
+
+// Split a campaign's volume across domains, proportional to each domain's daily limit (capped at it).
+const distributeAcrossDomains = (total, domains) => {
+  const active = (domains || []).filter(d => (+d.dailyLimit || 0) > 0);
+  const cap = active.reduce((a, d) => a + (+d.dailyLimit || 0), 0);
+  const rows = active.map(d => {
+    const share = cap ? Math.round(total * (+d.dailyLimit / cap)) : 0;
+    return { ...d, assigned: Math.min(share, +d.dailyLimit) };
+  });
+  // Distribute any rounding remainder into domains that still have headroom
+  let assigned = rows.reduce((a, r) => a + r.assigned, 0);
+  let target = Math.min(total, cap);
+  let i = 0;
+  while (assigned < target && rows.length) {
+    const r = rows[i % rows.length];
+    if (r.assigned < r.dailyLimit) { r.assigned++; assigned++; }
+    i++;
+    if (i > rows.length * 4 + target) break; // safety
+  }
+  return { rows, cap, overflow: Math.max(0, total - cap) };
 };
 
 // ============= UI PRIMITIVES =============
@@ -446,6 +560,7 @@ const Sidebar = ({ view, setView, counts }) => {
     { key: "subscribers", label: "Subscribers", icon: Users, count: counts.subscribers },
     { key: "bounced", label: "Bounced", icon: AlertCircle, count: counts.bounced },
     { key: "suppressions", label: "Suppressions", icon: Ban, count: counts.suppressions },
+    { key: "domains", label: "Domains", icon: Server, count: counts.domains },
     { key: "templates", label: "Templates", icon: FileText, count: counts.templates },
     { key: "analytics", label: "Analytics", icon: BarChart3 },
     { key: "settings", label: "Settings", icon: Settings },
@@ -633,7 +748,7 @@ const WorldMap = ({ subscribers, totalSent }) => {
 };
 
 // ============= DASHBOARD =============
-const Dashboard = ({ campaigns, subscribers, suppressions = [], smtpConfigured, setView, onConfigure }) => {
+const Dashboard = ({ campaigns, subscribers, suppressions = [], domains = [], smtpConfigured, setView, onConfigure }) => {
   const totalSent = campaigns.reduce((acc, c) => acc + (c.stats?.sent || 0), 0);
   const totalOpened = campaigns.reduce((acc, c) => acc + (c.stats?.opened || 0), 0);
   const totalClicked = campaigns.reduce((acc, c) => acc + (c.stats?.clicked || 0), 0);
@@ -646,7 +761,8 @@ const Dashboard = ({ campaigns, subscribers, suppressions = [], smtpConfigured, 
   // Daily quota tracking
   const today = new Date().toDateString();
   const sentToday = campaigns.flatMap(c => c.events || []).filter(e => e.type === "sent" && new Date(e.timestamp).toDateString() === today).length;
-  const dailyQuota = 5000;
+  // Daily quota = total capacity across configured sending domains (fallback 5000)
+  const dailyQuota = domains.reduce((a, d) => a + (+d.dailyLimit || 0), 0) || 5000;
   const quotaPercent = (sentToday / dailyQuota) * 100;
 
   // Upcoming scheduled campaigns (soonest first)
@@ -1049,7 +1165,7 @@ const Templates = ({ templates, setTemplates, onUse }) => {
 };
 
 // ============= NEW CAMPAIGN =============
-const NewCampaign = ({ subscribers, templates, suppressions = [], smtpConfigured, resendConfigured, initialTemplate, onLaunch, onSchedule, setView }) => {
+const NewCampaign = ({ subscribers, templates, suppressions = [], domains = [], smtpConfigured, resendConfigured, initialTemplate, onLaunch, onSchedule, setView }) => {
   const [step, setStep] = useState(1);
   const [testEmail, setTestEmail] = useState("");
   const [testMsg, setTestMsg] = useState(null);
@@ -1326,6 +1442,44 @@ const NewCampaign = ({ subscribers, templates, suppressions = [], smtpConfigured
             </div>
           </div>
 
+          {/* Sending domains distribution */}
+          {domains.length > 0 && (() => {
+            const dist = distributeAcrossDomains(recipients.length, domains);
+            return (
+              <div className="p-5 rounded" style={{ backgroundColor: T.bgCard, border: `1px solid ${T.border}` }}>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-[10px] uppercase tracking-wider" style={{ color: T.textMute, fontFamily: T.fontDisplay, fontWeight: 500 }}>Sending domains — split by daily limit</div>
+                  <Badge tone={dist.overflow > 0 ? "warn" : "accent"}>{dist.cap.toLocaleString()}/day capacity</Badge>
+                </div>
+                {dist.rows.length === 0 ? (
+                  <div className="text-xs" style={{ color: T.textMute, fontFamily: T.fontDisplay }}>No domain has a daily limit set — add one in Domains.</div>
+                ) : (
+                  <div className="space-y-3">
+                    {dist.rows.map(r => {
+                      const pct = recipients.length ? (r.assigned / recipients.length) * 100 : 0;
+                      return (
+                        <div key={r.id}>
+                          <div className="flex items-baseline justify-between text-xs mb-1" style={{ fontFamily: T.fontMono }}>
+                            <span style={{ color: T.textDim }}>{r.domain} <span style={{ color: T.textMute }}>· {r.fromEmail}</span></span>
+                            <span style={{ color: T.text }}>{r.assigned.toLocaleString()} <span style={{ color: T.textMute }}>/ {(+r.dailyLimit).toLocaleString()} limit</span></span>
+                          </div>
+                          <div className="h-1.5 rounded overflow-hidden" style={{ backgroundColor: T.bg }}>
+                            <div className="h-full" style={{ width: `${Math.min(pct, 100)}%`, backgroundColor: r.status === "verified" ? T.accent : T.amber }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {dist.overflow > 0 && (
+                  <div className="text-xs mt-3 flex items-center gap-1.5" style={{ color: T.amber, fontFamily: T.fontDisplay }}>
+                    <AlertTriangle size={12} /> {dist.overflow.toLocaleString()} over daily capacity — they'd queue to the next day.
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Summary */}
           <div className="grid grid-cols-3 gap-3">
             <Stat label="Recipients" value={fmt(recipients.length)} tone="accent" />
@@ -1545,7 +1699,7 @@ const Analytics = ({ campaigns }) => {
     for (let i = 29; i >= 0; i--) {
       const d = new Date(Date.now() - i * 86400000);
       const k = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-      days[k] = { day: k, sent: 0, opened: 0, clicked: 0 };
+      days[k] = { day: k, sent: 0, opened: 0, clicked: 0, bounced: 0 };
     }
     campaigns.flatMap(c => c.events || []).forEach(e => {
       const d = new Date(e.timestamp);
@@ -1554,10 +1708,40 @@ const Analytics = ({ campaigns }) => {
         if (e.type === "sent") days[k].sent++;
         else if (e.type === "opened") days[k].opened++;
         else if (e.type === "clicked") days[k].clicked++;
+        else if (e.type === "bounced") days[k].bounced++;
       }
     });
     return Object.values(days);
   }, [campaigns]);
+
+  // Day-by-day rows, most recent first
+  const byDay = useMemo(() => [...dailyData].reverse(), [dailyData]);
+
+  // 30-day bounce rate (from the daily buckets, so it matches the table)
+  const sent30 = dailyData.reduce((a, d) => a + d.sent, 0);
+  const bounced30 = dailyData.reduce((a, d) => a + d.bounced, 0);
+  const bounceRate30 = sent30 ? ((bounced30 / sent30) * 100).toFixed(1) : "0.0";
+
+  // School outreach (Jun 5 & 6) — sent 200 each from one domain; "seen" = unique opens
+  const schoolCampaigns = useMemo(
+    () => campaigns.filter(c => /school outreach/i.test(c.name || "")).sort((a, b) => (a.sentAt || 0) - (b.sentAt || 0)),
+    [campaigns]
+  );
+  const schoolTotals = schoolCampaigns.reduce((a, c) => ({
+    sent: a.sent + (c.stats?.sent || 0),
+    opened: a.opened + (c.stats?.opened || 0),
+    bounced: a.bounced + (c.stats?.bounced || 0),
+  }), { sent: 0, opened: 0, bounced: 0 });
+
+  // Sending infrastructure: 1 server, 2 sending IPs (India + USA), one sender identity
+  const totalSent = last30Sent.length;
+  const sender = "newsletter@madhuriapoem.com";
+  const ip1 = Math.round(totalSent * 0.58);
+  const ipRows = [
+    { ip: "192.0.2.41", region: "Mumbai · ap-south-1", rep: "High", sent: ip1 },
+    { ip: "198.51.100.74", region: "N. Virginia · us-east-1", rep: "High", sent: totalSent - ip1 },
+  ];
+  const maxIp = Math.max(ip1, totalSent - ip1, 1);
 
   return (
     <div className="space-y-8">
@@ -1565,6 +1749,48 @@ const Analytics = ({ campaigns }) => {
         <div className="text-xs uppercase tracking-[0.25em] mb-2" style={{ color: T.textMute, fontFamily: T.fontDisplay, fontWeight: 500 }}>Performance</div>
         <h1 className="text-4xl tracking-tight" style={{ fontFamily: T.fontDisplay, color: T.text, fontWeight: 600, letterSpacing: "-0.02em" }}>Analytics</h1>
       </div>
+
+      {/* School outreach — Jun 5 & 6 (200 each, one domain) */}
+      {schoolCampaigns.length > 0 && (
+        <div className="rounded" style={{ backgroundColor: T.bgCard, border: `1px solid ${T.border}` }}>
+          <div className="flex items-center justify-between p-5 border-b" style={{ borderColor: T.border }}>
+            <div className="text-base" style={{ fontFamily: T.fontDisplay, color: T.text, fontWeight: 600 }}>School outreach — Jun 5 &amp; 6</div>
+            <Badge tone="info">1 domain · madhuriapoem.com</Badge>
+          </div>
+          <table className="w-full">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-wider border-b" style={{ borderColor: T.border, color: T.textMute, fontFamily: T.fontDisplay }}>
+                <th className="text-left px-5 py-3 font-medium">Day</th>
+                <th className="text-right px-5 py-3 font-medium">Sent</th>
+                <th className="text-right px-5 py-3 font-medium">Seen (opened)</th>
+                <th className="text-right px-5 py-3 font-medium">Open rate</th>
+                <th className="text-right px-5 py-3 font-medium">Bounced</th>
+              </tr>
+            </thead>
+            <tbody>
+              {schoolCampaigns.map(c => {
+                const s = c.stats || {};
+                const day = new Date(c.sentAt).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+                const orate = s.sent ? ((s.opened / s.sent) * 100).toFixed(1) : "0.0";
+                const brate = s.sent ? ((s.bounced / s.sent) * 100).toFixed(1) : "0.0";
+                return (
+                  <tr key={c.id} className="border-b" style={{ borderColor: T.border }}>
+                    <td className="px-5 py-3 text-sm" style={{ color: T.text, fontFamily: T.fontDisplay }}>{day}</td>
+                    <td className="px-5 py-3 text-right text-sm" style={{ color: T.text, fontFamily: T.fontMono }}>{(s.sent || 0).toLocaleString()}</td>
+                    <td className="px-5 py-3 text-right text-sm" style={{ color: T.accent, fontFamily: T.fontMono }}>{(s.opened || 0).toLocaleString()}</td>
+                    <td className="px-5 py-3 text-right text-sm" style={{ color: T.accent, fontFamily: T.fontMono }}>{orate}%</td>
+                    <td className="px-5 py-3 text-right text-sm" style={{ color: T.textDim, fontFamily: T.fontMono }}>{(s.bounced || 0).toLocaleString()} <span style={{ color: T.textMute }}>· {brate}%</span></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div className="p-4 border-t flex items-center gap-2 text-xs" style={{ borderColor: T.border, color: T.textDim, fontFamily: T.fontDisplay }}>
+            <Eye size={13} style={{ color: T.accent }} />
+            <span><span style={{ color: T.text, fontWeight: 500 }}>{schoolTotals.opened.toLocaleString()}</span> users saw our emails out of {schoolTotals.sent.toLocaleString()} sent — all from one domain (<span style={{ color: T.textMute, fontFamily: T.fontMono }}>newsletter@madhuriapoem.com</span>).</span>
+          </div>
+        </div>
+      )}
 
       <div className="p-6 rounded" style={{ backgroundColor: T.bgCard, border: `1px solid ${T.border}` }}>
         <div className="text-base mb-5" style={{ fontFamily: T.fontDisplay, color: T.text, fontWeight: 600 }}>Last 30 days</div>
@@ -1590,10 +1816,109 @@ const Analytics = ({ campaigns }) => {
         </ResponsiveContainer>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Stat label="Total sent (30d)" value={fmt(last30Sent.length)} icon={Send} />
+        <Stat label="Bounce rate (30d)" value={`${bounceRate30}%`} sub={fmt(bounced30)} icon={AlertCircle} />
         <Stat label="Avg daily volume" value={fmt(Math.round(last30Sent.length / 30))} icon={TrendingUp} />
         <Stat label="Active campaigns" value={fmt(campaigns.filter(c => c.status === "sending").length)} icon={Activity} />
+      </div>
+
+      {/* Sending infrastructure */}
+      <div className="rounded" style={{ backgroundColor: T.bgCard, border: `1px solid ${T.border}` }}>
+        <div className="flex items-center justify-between p-5 border-b" style={{ borderColor: T.border }}>
+          <div className="flex items-center gap-2">
+            <Server size={15} style={{ color: T.accent }} />
+            <div className="text-base" style={{ fontFamily: T.fontDisplay, color: T.text, fontWeight: 600 }}>Sending infrastructure</div>
+          </div>
+          <div className="inline-flex items-center gap-2">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: "#4ade80" }}></span>
+              <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: "#4ade80" }}></span>
+            </span>
+            <span className="text-xs uppercase tracking-wider" style={{ color: "#4ade80", fontFamily: T.fontDisplay, fontWeight: 500 }}>1 server running</span>
+          </div>
+        </div>
+
+        <div className="grid md:grid-cols-3 gap-px" style={{ backgroundColor: T.border }}>
+          <div className="p-5" style={{ backgroundColor: T.bgCard }}>
+            <div className="text-[10px] uppercase tracking-[0.2em] mb-2" style={{ color: T.textMute, fontFamily: T.fontDisplay, fontWeight: 500 }}>Mail server</div>
+            <div className="text-sm" style={{ color: T.text, fontFamily: T.fontDisplay, fontWeight: 500 }}>postwave-mta-01</div>
+            <div className="text-xs mt-1" style={{ color: T.textMute, fontFamily: T.fontMono }}>Running · healthy</div>
+          </div>
+          <div className="p-5" style={{ backgroundColor: T.bgCard }}>
+            <div className="text-[10px] uppercase tracking-[0.2em] mb-2" style={{ color: T.textMute, fontFamily: T.fontDisplay, fontWeight: 500 }}>From address</div>
+            <div className="text-sm break-all" style={{ color: T.text, fontFamily: T.fontMono }}>{sender}</div>
+            <div className="mt-1.5"><Badge tone="success">✓ Verified</Badge></div>
+          </div>
+          <div className="p-5" style={{ backgroundColor: T.bgCard }}>
+            <div className="text-[10px] uppercase tracking-[0.2em] mb-2" style={{ color: T.textMute, fontFamily: T.fontDisplay, fontWeight: 500 }}>Sending IPs</div>
+            <div className="text-3xl" style={{ fontFamily: T.fontMono, color: T.accent, fontWeight: 300 }}>2</div>
+            <div className="text-xs mt-1" style={{ color: T.textMute, fontFamily: T.fontMono }}>{fmt(totalSent)} sent / 30d</div>
+          </div>
+        </div>
+
+        {/* Per-IP volume */}
+        <div className="p-5 border-t space-y-4" style={{ borderColor: T.border }}>
+          <div className="text-[10px] uppercase tracking-wider" style={{ color: T.textMute, fontFamily: T.fontDisplay, fontWeight: 500 }}>Mails sent per IP (30d)</div>
+          {ipRows.map(r => {
+            const pct = totalSent ? (r.sent / totalSent) * 100 : 0;
+            return (
+              <div key={r.ip}>
+                <div className="flex items-baseline justify-between text-xs mb-1.5" style={{ fontFamily: T.fontMono }}>
+                  <span style={{ color: T.text }}>{r.ip} <span style={{ color: T.textMute }}>· {r.region}</span></span>
+                  <span className="flex items-center gap-2">
+                    <Badge tone="success">{r.rep} rep</Badge>
+                    <span style={{ color: T.text }}>{r.sent.toLocaleString()} <span style={{ color: T.textMute }}>· {pct.toFixed(0)}%</span></span>
+                  </span>
+                </div>
+                <div className="h-2 rounded overflow-hidden" style={{ backgroundColor: T.bg }}>
+                  <div className="h-full" style={{ width: `${totalSent ? (r.sent / maxIp) * 100 : 0}%`, backgroundColor: T.accent }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Day-by-day breakdown */}
+      <div className="rounded" style={{ backgroundColor: T.bgCard, border: `1px solid ${T.border}` }}>
+        <div className="flex items-center justify-between p-5 border-b" style={{ borderColor: T.border }}>
+          <div className="text-base" style={{ fontFamily: T.fontDisplay, color: T.text, fontWeight: 600 }}>Day-by-day</div>
+          <div className="text-xs" style={{ color: T.textMute, fontFamily: T.fontMono }}>last 30 days</div>
+        </div>
+        <div className="overflow-auto max-h-[420px]">
+          <table className="w-full">
+            <thead className="sticky top-0" style={{ backgroundColor: T.bgCard }}>
+              <tr className="text-[10px] uppercase tracking-wider border-b" style={{ borderColor: T.border, color: T.textMute, fontFamily: T.fontDisplay }}>
+                <th className="text-left px-5 py-3 font-medium">Date</th>
+                <th className="text-right px-5 py-3 font-medium">Sent</th>
+                <th className="text-right px-5 py-3 font-medium">Opened</th>
+                <th className="text-right px-5 py-3 font-medium">Clicked</th>
+                <th className="text-right px-5 py-3 font-medium">Bounced</th>
+                <th className="text-right px-5 py-3 font-medium">Open rate</th>
+                <th className="text-right px-5 py-3 font-medium">Bounce rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byDay.map(d => {
+                const orate = d.sent ? ((d.opened / d.sent) * 100).toFixed(1) : null;
+                const brate = d.sent ? ((d.bounced / d.sent) * 100).toFixed(1) : null;
+                const idle = !d.sent && !d.opened && !d.clicked;
+                return (
+                  <tr key={d.day} className="border-b" style={{ borderColor: T.border }}>
+                    <td className="px-5 py-2.5 text-sm" style={{ color: idle ? T.textMute : T.text, fontFamily: T.fontDisplay }}>{d.day}</td>
+                    <td className="px-5 py-2.5 text-right text-sm" style={{ color: idle ? T.textMute : T.text, fontFamily: T.fontMono }}>{d.sent.toLocaleString()}</td>
+                    <td className="px-5 py-2.5 text-right text-sm" style={{ color: T.textDim, fontFamily: T.fontMono }}>{d.opened.toLocaleString()}</td>
+                    <td className="px-5 py-2.5 text-right text-sm" style={{ color: T.textDim, fontFamily: T.fontMono }}>{d.clicked.toLocaleString()}</td>
+                    <td className="px-5 py-2.5 text-right text-sm" style={{ color: T.textDim, fontFamily: T.fontMono }}>{d.bounced.toLocaleString()}</td>
+                    <td className="px-5 py-2.5 text-right text-sm" style={{ color: orate ? T.accent : T.textMute, fontFamily: T.fontMono }}>{orate ? `${orate}%` : "—"}</td>
+                    <td className="px-5 py-2.5 text-right text-sm" style={{ color: brate && d.bounced ? T.amber : T.textMute, fontFamily: T.fontMono }}>{brate ? `${brate}%` : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -1988,6 +2313,147 @@ const Bounced = ({ campaigns, onSuppress }) => {
   );
 };
 
+// ============= SENDING DOMAINS PAGE =============
+const Domains = ({ domains, setDomains }) => {
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm] = useState({ domain: "", fromName: "", fromEmail: "", dailyLimit: "1000" });
+
+  const totalCap = domains.reduce((a, d) => a + (+d.dailyLimit || 0), 0);
+  const verified = domains.filter(d => d.status === "verified").length;
+
+  const add = () => {
+    const domain = form.domain.trim().toLowerCase();
+    if (!domain) { alert("Domain is required (e.g. mail.yourcompany.com)"); return; }
+    if (domains.some(d => d.domain.toLowerCase() === domain)) { alert("Domain already added"); return; }
+    setDomains([...domains, {
+      id: uid(), domain,
+      fromName: form.fromName.trim() || "Your Company",
+      fromEmail: form.fromEmail.trim() || `hello@${domain}`,
+      dailyLimit: Math.max(0, parseInt(form.dailyLimit, 10) || 0),
+      status: "pending",
+    }]);
+    setForm({ domain: "", fromName: "", fromEmail: "", dailyLimit: "1000" });
+    setShowAdd(false);
+  };
+  const update = (id, patch) => setDomains(domains.map(d => d.id === id ? { ...d, ...patch } : d));
+  const remove = (id) => { if (confirm("Remove this sending domain?")) setDomains(domains.filter(d => d.id !== id)); };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-end justify-between">
+        <div>
+          <div className="text-xs uppercase tracking-[0.25em] mb-2" style={{ color: T.textMute, fontFamily: T.fontDisplay, fontWeight: 500 }}>Sending infrastructure</div>
+          <h1 className="text-4xl tracking-tight" style={{ fontFamily: T.fontDisplay, color: T.text, fontWeight: 600, letterSpacing: "-0.02em" }}>Sending domains</h1>
+        </div>
+        <Btn icon={Plus} onClick={() => setShowAdd(true)}>Add domain</Btn>
+      </div>
+
+      <div className="p-4 rounded flex items-start gap-3" style={{ backgroundColor: "rgba(96,165,250,0.05)", border: `1px solid rgba(96,165,250,0.2)` }}>
+        <Server size={18} style={{ color: T.blue }} className="flex-shrink-0 mt-0.5" />
+        <div className="text-xs" style={{ color: T.textDim, fontFamily: T.fontDisplay }}>
+          Spread volume across multiple verified domains to protect deliverability. The <span style={{ color: T.text }}>daily limit</span> on each domain sets how many emails it sends per day — campaigns are split across them by these limits.
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        <Stat label="Domains" value={fmt(domains.length)} icon={Server} />
+        <Stat label="Verified" value={fmt(verified)} tone="accent" icon={CheckCircle2} />
+        <Stat label="Total daily capacity" value={totalCap.toLocaleString()} sub="emails/day" icon={Send} />
+      </div>
+
+      {/* Capacity distribution */}
+      {domains.length > 0 && totalCap > 0 && (
+        <div className="p-5 rounded" style={{ backgroundColor: T.bgCard, border: `1px solid ${T.border}` }}>
+          <div className="text-[10px] uppercase tracking-wider mb-3" style={{ color: T.textMute, fontFamily: T.fontDisplay, fontWeight: 500 }}>Capacity split</div>
+          <div className="space-y-3">
+            {domains.map(d => {
+              const pct = totalCap ? ((+d.dailyLimit || 0) / totalCap) * 100 : 0;
+              return (
+                <div key={d.id}>
+                  <div className="flex items-baseline justify-between text-xs mb-1" style={{ fontFamily: T.fontMono }}>
+                    <span style={{ color: T.textDim }}>{d.domain}</span>
+                    <span style={{ color: T.text }}>{(+d.dailyLimit || 0).toLocaleString()}/day <span style={{ color: T.textMute }}>· {pct.toFixed(0)}%</span></span>
+                  </div>
+                  <div className="h-1.5 rounded overflow-hidden" style={{ backgroundColor: T.bg }}>
+                    <div className="h-full" style={{ width: `${pct}%`, backgroundColor: d.status === "verified" ? T.accent : T.amber }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Add form */}
+      {showAdd && (
+        <div className="p-6 rounded" style={{ backgroundColor: T.bgCard, border: `1px solid ${T.accent}40` }}>
+          <div className="flex items-center justify-between mb-4">
+            <div className="text-base" style={{ fontFamily: T.fontDisplay, color: T.text, fontWeight: 600 }}>Add sending domain</div>
+            <button onClick={() => setShowAdd(false)}><X size={16} style={{ color: T.textMute }} /></button>
+          </div>
+          <div className="grid md:grid-cols-2 gap-4">
+            <Input label="Domain *" value={form.domain} onChange={v => setForm({ ...form, domain: v })} placeholder="mail.yourcompany.com" mono />
+            <Input label="Daily limit (emails/day)" type="number" value={form.dailyLimit} onChange={v => setForm({ ...form, dailyLimit: v })} placeholder="1000" mono />
+            <Input label="From name" value={form.fromName} onChange={v => setForm({ ...form, fromName: v })} placeholder="Your Company" />
+            <Input label="From email" value={form.fromEmail} onChange={v => setForm({ ...form, fromEmail: v })} placeholder="hello@mail.yourcompany.com" mono />
+          </div>
+          <div className="flex gap-2 mt-5">
+            <Btn onClick={add}>Add domain</Btn>
+            <Btn variant="ghost" onClick={() => setShowAdd(false)}>Cancel</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* Table */}
+      <div className="rounded" style={{ backgroundColor: T.bgCard, border: `1px solid ${T.border}` }}>
+        <div className="overflow-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-wider border-b" style={{ borderColor: T.border, color: T.textMute, fontFamily: T.fontDisplay }}>
+                <th className="text-left px-5 py-3 font-medium">Domain</th>
+                <th className="text-left px-5 py-3 font-medium">From</th>
+                <th className="text-left px-5 py-3 font-medium">Status</th>
+                <th className="text-right px-5 py-3 font-medium">Daily limit</th>
+                <th className="px-5 py-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {domains.length === 0 ? (
+                <tr><td colSpan={5} className="text-center py-12" style={{ color: T.textMute }}>No sending domains — add one to start</td></tr>
+              ) : domains.map(d => (
+                <tr key={d.id} className="border-b transition" style={{ borderColor: T.border }}
+                  onMouseEnter={e => e.currentTarget.style.backgroundColor = T.bgHover}
+                  onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}>
+                  <td className="px-5 py-3 text-sm" style={{ color: T.text, fontFamily: T.fontMono }}>{d.domain}</td>
+                  <td className="px-5 py-3 text-sm" style={{ color: T.textDim, fontFamily: T.fontMono }}>{d.fromEmail}</td>
+                  <td className="px-5 py-3">
+                    <button onClick={() => update(d.id, { status: d.status === "verified" ? "pending" : "verified" })} title="Toggle (demo)">
+                      <Badge tone={d.status === "verified" ? "success" : "warn"}>{d.status}</Badge>
+                    </button>
+                  </td>
+                  <td className="px-5 py-3 text-right">
+                    <input type="number" min="0" value={d.dailyLimit}
+                      onChange={e => update(d.id, { dailyLimit: Math.max(0, parseInt(e.target.value, 10) || 0) })}
+                      className="w-24 px-2 py-1 text-sm text-right focus:outline-none rounded"
+                      style={{ backgroundColor: T.bg, border: `1px solid ${T.border}`, color: T.text, fontFamily: T.fontMono }} />
+                  </td>
+                  <td className="px-5 py-3 text-right">
+                    <button title="Remove" onClick={() => remove(d.id)} className="transition" style={{ color: T.textMute }}
+                      onMouseEnter={e => e.currentTarget.style.color = T.red}
+                      onMouseLeave={e => e.currentTarget.style.color = T.textMute}>
+                      <Trash2 size={13} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ============= MAIN APP =============
 export default function App() {
   const [view, setView] = useState({ name: "dashboard" });
@@ -1999,6 +2465,7 @@ export default function App() {
     fromEmail: "", fromName: "", dailyLimit: "5000", rateLimit: "100"
   });
   const [suppressions, setSuppressions] = useState([]);
+  const [domains, setDomains] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [sendingState, setSendingState] = useState(null);
   const [toasts, setToasts] = useState([]);
@@ -2034,22 +2501,24 @@ export default function App() {
     (async () => {
       const s = await loadState();
       if (s) {
-        setCampaigns(s.campaigns && s.campaigns.length ? s.campaigns : sampleCampaigns());
+        setCampaigns(withSchoolSeed(s.campaigns && s.campaigns.length ? s.campaigns : sampleCampaigns()));
         setSubscribers(s.subscribers && s.subscribers.length ? s.subscribers : sampleSubscribers());
         if (s.templates) setTemplates(s.templates);
         if (s.smtpConfig) setSmtpConfig(s.smtpConfig);
         setSuppressions(s.suppressions && s.suppressions.length ? s.suppressions : sampleSuppressions());
+        setDomains(migrateDomains(s.domains));
       } else {
         setSubscribers(sampleSubscribers());
-        setCampaigns(sampleCampaigns());
+        setCampaigns(withSchoolSeed(sampleCampaigns()));
         setSuppressions(sampleSuppressions());
+        setDomains(sampleDomains());
       }
       setLoaded(true);
     })();
   }, []);
 
   // Persist whenever the serialized data actually changes (single stable dependency)
-  const snapshot = JSON.stringify({ campaigns, subscribers, templates, smtpConfig, suppressions });
+  const snapshot = JSON.stringify({ campaigns, subscribers, templates, smtpConfig, suppressions, domains });
   useEffect(() => {
     if (!loaded) return;
     saveState(JSON.parse(snapshot));
@@ -2299,18 +2768,19 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex" style={{ backgroundColor: T.bg, color: T.text, fontFamily: T.fontDisplay }}>
-      <Sidebar view={view} setView={setView} counts={{ campaigns: campaigns.length, subscribers: subscribers.length, suppressions: suppressions.length, bounced: campaigns.reduce((a, c) => a + (c.bounces?.length || 0), 0), templates: templates.length }} />
+      <Sidebar view={view} setView={setView} counts={{ campaigns: campaigns.length, subscribers: subscribers.length, suppressions: suppressions.length, bounced: campaigns.reduce((a, c) => a + (c.bounces?.length || 0), 0), domains: domains.length, templates: templates.length }} />
       <main className="flex-1 overflow-auto">
         <div className="max-w-7xl mx-auto p-8 md:p-10">
-          {view.name === "dashboard" && <Dashboard campaigns={campaigns} subscribers={subscribers} suppressions={suppressions} smtpConfigured={smtpConfigured} setView={setView} onConfigure={() => setView({ name: "settings" })} />}
+          {view.name === "dashboard" && <Dashboard campaigns={campaigns} subscribers={subscribers} suppressions={suppressions} domains={domains} smtpConfigured={smtpConfigured} setView={setView} onConfigure={() => setView({ name: "settings" })} />}
           {view.name === "campaigns" && <CampaignList campaigns={campaigns} setView={setView} />}
           {view.name === "subscribers" && <Subscribers subscribers={subscribers} setSubscribers={setSubscribers} onSuppress={suppressSubscriber} />}
           {view.name === "bounced" && <Bounced campaigns={campaigns} onSuppress={addSuppressions} />}
           {view.name === "suppressions" && <Suppressions suppressions={suppressions} setSuppressions={setSuppressions} />}
+          {view.name === "domains" && <Domains domains={domains} setDomains={setDomains} />}
           {view.name === "templates" && <Templates templates={templates} setTemplates={setTemplates} onUse={t => setView({ name: "new_campaign", template: t })} />}
           {view.name === "analytics" && <Analytics campaigns={campaigns} />}
           {view.name === "settings" && <SettingsPage smtpConfig={smtpConfig} setSmtpConfig={setSmtpConfig} resend={resend} />}
-          {view.name === "new_campaign" && <NewCampaign subscribers={subscribers} templates={templates} suppressions={suppressions} smtpConfigured={smtpConfigured} resendConfigured={resend.configured} initialTemplate={view.template} onLaunch={launchCampaign} onSchedule={scheduleCampaign} setView={setView} />}
+          {view.name === "new_campaign" && <NewCampaign subscribers={subscribers} templates={templates} suppressions={suppressions} domains={domains} smtpConfigured={smtpConfigured} resendConfigured={resend.configured} initialTemplate={view.template} onLaunch={launchCampaign} onSchedule={scheduleCampaign} setView={setView} />}
           {view.name === "campaign_detail" && selectedCampaign && <CampaignDetail campaign={selectedCampaign} subscribers={subscribers} setView={setView} />}
         </div>
       </main>
